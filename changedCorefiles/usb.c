@@ -697,60 +697,59 @@ static void endpoint0_setup(uint64_t setupdata)
 	  //all cases that end on 'A1': GET FEATURE directed to an interface (AudioControl or AudioStreaming)(Universal Serial Bus Device Class Definition for Audio Devices 2.0, Section 5.2.2, Table 5-1 page 90-91)
 	  //all cases that end on 'A2': GET FEATURE directed to isochronous endpoint of an AudioStreaming interface (Universal Serial Bus Device Class Definition for Audio Devices 2.0, Section 5.2.2, Table 5-1 page 90-91)
 
+	  // GET requests (CUR=0x01, RANGE=0x02, MEM=0x03) directed to an entity of the AudioControl interface.
+	  // Handled explicitly per entity (no fall through between the cases):
+	  //   0x3a: clock source (sampling frequency, clock valid)
+	  //   0x31: feature unit (mute, volume) -> usb_audio_get_feature
 	  case 0x01A1: //-> get CUR request
-	  	if(	LSB(setup.wIndex) == AUDIO_INTERFACE &&
-			MSB(setup.wIndex) == 0x3a		//0x3a is the bClockID	
-			){
-				if(setup.wValue == 0x0100){
-					//0x01...CS_SAM_FREQ_CONTROL 0x00... channel must be set to 0
-					endpoint0_buffer[0] = ((uint32_t)AUDIO_SAMPLE_RATE) & 255;
-					endpoint0_buffer[1] = (((uint32_t)AUDIO_SAMPLE_RATE) >> 8) & 255;
-					endpoint0_buffer[2] = (((uint32_t)AUDIO_SAMPLE_RATE) >> 16) & 255;
-					endpoint0_buffer[3] = 0;
-					uint32_t l = setup.wLength < 4 ? setup.wLength : 4;
-					endpoint0_transmit(endpoint0_buffer, l, 0);
-					return;
-				}
-				if(setup.wValue == 0x0200){
-					//0x02...CS_CLOCK_VALID_CONTROL 0x00... channel must be set to 0
-					endpoint0_buffer[0] = 1; //always valid
-					uint32_t l = setup.wLength < 1 ? setup.wLength : 1;
-					endpoint0_transmit(endpoint0_buffer, l, 0);
-					return;
-				}						
-			}
-	  case 0x02A1: //-> get RANGE request 
-	  	if(	LSB(setup.wIndex) == AUDIO_INTERFACE &&
-			MSB(setup.wIndex) == 0x3a &&	//0x3a is the bClockID	
-			setup.wValue == 0x0100			//range of clock
-			){
-				
-			endpoint0_buffer[0] = 1; //only one sub-range (LSB of 2 bytes)
-			endpoint0_buffer[1] = 0; //only one sub-range (MSB of 2 bytes)
-			//min value of range
-			endpoint0_buffer[2] = ((uint32_t)AUDIO_SAMPLE_RATE) & 255;
-			endpoint0_buffer[3] = (((uint32_t)AUDIO_SAMPLE_RATE) >> 8) & 255;
-			endpoint0_buffer[4] = (((uint32_t)AUDIO_SAMPLE_RATE) >> 16) & 255;
-			endpoint0_buffer[5] = 0;
-			//max value of range (=min value)
-			endpoint0_buffer[6]= endpoint0_buffer[2];
-			endpoint0_buffer[7]= endpoint0_buffer[3];
-			endpoint0_buffer[8]= endpoint0_buffer[4];
-			endpoint0_buffer[9]= endpoint0_buffer[5];
-			//resolution
-			endpoint0_buffer[10]= 0;
-			endpoint0_buffer[11]= 0;
-			endpoint0_buffer[12]= 0;
-			endpoint0_buffer[13]= 0;
-			uint32_t l = setup.wLength < 14 ? setup.wLength : 14;
-			endpoint0_transmit(endpoint0_buffer, l, 0);
-			return;
-						
+	  case 0x02A1: //-> get RANGE request
+	  case 0x03A1: //-> get MEM request
+		if (LSB(setup.wIndex) != AUDIO_INTERFACE) {
+			break;
 		}
-	  case 0x03A1: //-> get MEM request 
-		if(	LSB(setup.wIndex) == AUDIO_INTERFACE &&	
-			MSB(setup.wIndex) == 0x31		//0x31 is the bUnitID of the volume control	
-			){
+		if (MSB(setup.wIndex) == 0x3a) { //0x3a is the bClockID
+			if (setup.bRequest == 0x01 && setup.wValue == 0x0100) {
+				//CUR, 0x01...CS_SAM_FREQ_CONTROL 0x00... channel must be set to 0
+				endpoint0_buffer[0] = ((uint32_t)AUDIO_SAMPLE_RATE) & 255;
+				endpoint0_buffer[1] = (((uint32_t)AUDIO_SAMPLE_RATE) >> 8) & 255;
+				endpoint0_buffer[2] = (((uint32_t)AUDIO_SAMPLE_RATE) >> 16) & 255;
+				endpoint0_buffer[3] = 0;
+				uint32_t l = setup.wLength < 4 ? setup.wLength : 4;
+				endpoint0_transmit(endpoint0_buffer, l, 0);
+				return;
+			}
+			if (setup.bRequest == 0x01 && setup.wValue == 0x0200) {
+				//CUR, 0x02...CS_CLOCK_VALID_CONTROL 0x00... channel must be set to 0
+				endpoint0_buffer[0] = 1; //always valid
+				uint32_t l = setup.wLength < 1 ? setup.wLength : 1;
+				endpoint0_transmit(endpoint0_buffer, l, 0);
+				return;
+			}
+			if (setup.bRequest == 0x02 && setup.wValue == 0x0100) {
+				//RANGE of the sampling frequency
+				endpoint0_buffer[0] = 1; //only one sub-range (LSB of 2 bytes)
+				endpoint0_buffer[1] = 0; //only one sub-range (MSB of 2 bytes)
+				//min value of range
+				endpoint0_buffer[2] = ((uint32_t)AUDIO_SAMPLE_RATE) & 255;
+				endpoint0_buffer[3] = (((uint32_t)AUDIO_SAMPLE_RATE) >> 8) & 255;
+				endpoint0_buffer[4] = (((uint32_t)AUDIO_SAMPLE_RATE) >> 16) & 255;
+				endpoint0_buffer[5] = 0;
+				//max value of range (=min value)
+				endpoint0_buffer[6]= endpoint0_buffer[2];
+				endpoint0_buffer[7]= endpoint0_buffer[3];
+				endpoint0_buffer[8]= endpoint0_buffer[4];
+				endpoint0_buffer[9]= endpoint0_buffer[5];
+				//resolution
+				endpoint0_buffer[10]= 0;
+				endpoint0_buffer[11]= 0;
+				endpoint0_buffer[12]= 0;
+				endpoint0_buffer[13]= 0;
+				uint32_t l = setup.wLength < 14 ? setup.wLength : 14;
+				endpoint0_transmit(endpoint0_buffer, l, 0);
+				return;
+			}
+		}
+		else if (MSB(setup.wIndex) == 0x31) { //0x31 is the bUnitID of the feature unit (mute, volume)
 			uint32_t len;
 			if (usb_audio_get_feature(&setup, endpoint0_buffer, &len)) {
 				//printf("GET feature, len=%d\n", len);
@@ -758,9 +757,8 @@ static void endpoint0_setup(uint64_t setupdata)
 				endpoint0_transmit(endpoint0_buffer, l, 0);
 				return;
 			}
-			break;			
 		}
-		
+		break; //not supported -> stall
 #endif
 #if defined(MULTITOUCH_INTERFACE)
 	  case 0x01A1:

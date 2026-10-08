@@ -93,7 +93,7 @@ class LastCall
         void updateExpectedTimeStep(double expectedTimeStep, bool setBoundary=true) { 
             if (setBoundary){
                 _boundaryFraction= uint32_t(UINT32_MAX- (3.*expectedTimeStep*N))/N; //3. is the safety factor
-                _boundary= _boundaryFraction*N;  //boundary % N ==0 is handy because we then don't need to update the reminders
+                _boundary= _boundaryFraction*N;  //boundary % N ==0 is handy because we then don't need to update the remainders
             }
             //make the perfect sequence
             _comPerfect.q=0;
@@ -179,7 +179,7 @@ class LastCall
                         _history.dataQR[i].q -= _boundaryFraction;
                     }
                     _history.com.q -= _boundary;  // because boundary == N * boundaryFraction
-                    // reminders unchanged since boundary % N == 0
+                    // remainders unchanged since boundary % N == 0
                 }
                 else {
                     // Slow but safe path: recompute everything from rebased data[]

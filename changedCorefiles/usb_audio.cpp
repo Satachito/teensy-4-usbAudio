@@ -50,7 +50,7 @@ void AudioInputUSB::update(void){
 	}
 }
 AudioInputUSB::AudioInputUSB(float kp,float ki) 
-	: AudioStream(0, NULL), _usbInterface(setBlockQuite,releaseBlock,allocateBlock,areBlocksReady,copy_to_buffers,kp, ki) {
+	: AudioStream(0, NULL), _usbInterface(setBlockQuiet,releaseBlock,allocateBlock,areBlocksReady,copy_to_buffers,kp, ki) {
 		        
 	for (uint16_t i =0; i< USBAudioInInterface::ringRxBufferSize; i++){
 		for (uint16_t j =0; j< USB_AUDIO_MAX_NO_CHANNELS; j++){
@@ -93,17 +93,31 @@ void AudioInputUSB::copy_to_buffers(const uint8_t *src, uint16_t bIdx, uint16_t 
 #endif
 
 #if AUDIO_SUBSLOT_SIZE==3
+// 24 bit samples from the host are reduced to the 16 bit samples of the audio library.
+// Default: round to nearest (instead of truncating, which adds a -0.5 LSB offset and more distortion).
+// Define AUDIO_USB_RX_DITHER to add TPDF dither (+-1 LSB of the 16 bit result) before rounding.
 void AudioInputUSB::copy_to_buffers(const uint8_t *src, uint16_t bIdx, uint16_t noChannels, unsigned int count, unsigned int len) {
+#ifdef AUDIO_USB_RX_DITHER
+	static uint32_t seed = 22222;
+#endif
 	for (uint32_t i =0; i< len; i++){
 		for (uint16_t j =0; j< noChannels; j++){
-			++src;
-			rxBuffer[bIdx][j]->data[count +i]=(*src++);
-			rxBuffer[bIdx][j]->data[count +i] |=(*src++)<<8;
+			//little endian 24 bit -> sign extended 32 bit
+			int32_t s = int32_t((uint32_t(src[0]) << 8) | (uint32_t(src[1]) << 16) | (uint32_t(src[2]) << 24)) >> 8;
+			src += 3;
+#ifdef AUDIO_USB_RX_DITHER
+			seed = seed * 1664525u + 1013904223u;	//LCG, the upper bits are used
+			s += int32_t((seed >> 24) & 0xFF) + int32_t((seed >> 16) & 0xFF) - 255;	//triangular PDF in [-255, 255]
+#endif
+			s = (s + 128) >> 8;	//round to nearest 16 bit value
+			if (s > 32767) s = 32767;
+			else if (s < -32768) s = -32768;
+			rxBuffer[bIdx][j]->data[count +i] = int16_t(s);
 		}
 	}
 }
 #endif
-bool AudioInputUSB::setBlockQuite(uint16_t bIdx, uint16_t channel){        
+bool AudioInputUSB::setBlockQuiet(uint16_t bIdx, uint16_t channel){        
 	if(!rxBuffer[bIdx][channel]){
 		rxBuffer[bIdx][channel] = AudioStream::allocate();
 	}
@@ -168,22 +182,32 @@ void AudioOutputUSB::update(void){
 		//nothing to store: bIdx is -1 and must not be used as an index into txBuffer
 		return;
 	}
+	//Channels without input (unconnected, or more USB channels than inputs of this object) all share
+	//one silent block (reference counted) instead of allocating one zero block per channel.
+	audio_block_t *silent = NULL;
 	for (uint16_t i =0; i< noChannels; i++){
 		if(txBuffer[bIdx][i]){
 			release(txBuffer[bIdx][i]);
 		}
 		txBuffer[bIdx][i]=receiveReadOnly(i);
 		if(!txBuffer[bIdx][i]){
-			if(!txBuffer[bIdx][i]){
-				txBuffer[bIdx][i] = AudioStream::allocate();
-			}
-			if(txBuffer[bIdx][i]){
-				memset(txBuffer[bIdx][i]->data, 0, AUDIO_BLOCK_SAMPLES*sizeof(txBuffer[bIdx][i]->data[0]));
+			if(silent){
+				__disable_irq();	//ref_count is also changed by release() in the USB ISR
+				silent->ref_count++;
+				__enable_irq();
+				txBuffer[bIdx][i] = silent;
 			}
 			else {
-				//we ran out of audio memory
-				releaseBlocks(bIdx, noChannels);
-				break;
+				silent = AudioStream::allocate();
+				if(silent){
+					memset(silent->data, 0, AUDIO_BLOCK_SAMPLES*sizeof(silent->data[0]));
+					txBuffer[bIdx][i] = silent;
+				}
+				else {
+					//we ran out of audio memory
+					releaseBlocks(bIdx, noChannels);
+					break;
+				}
 			}
 		}
 	}

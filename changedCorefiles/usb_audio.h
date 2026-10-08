@@ -37,6 +37,8 @@
 #if defined(__cplusplus)
 #include "AudioStream.h"
 
+// Only ONE AudioInputUSB(Quad/Hex/Oct) and ONE AudioOutputUSB(Quad/Hex/Oct) object may exist in a sketch:
+// the ring buffers and the USB state are static (see usb_audio_interface.h).
 class AudioInputUSB : public AudioStream
 {
 public:
@@ -53,7 +55,7 @@ public:
 
 private:
 	static void copy_to_buffers(const uint8_t *src, uint16_t bIdx, uint16_t noChannels, unsigned int count, unsigned int len);
-    static bool setBlockQuite(uint16_t bIdx, uint16_t channel);
+    static bool setBlockQuiet(uint16_t bIdx, uint16_t channel);
     static void releaseBlock(uint16_t bIdx, uint16_t channel);
     static bool allocateBlock(uint16_t bIdx, uint16_t channel);
     static bool areBlocksReady(uint16_t bIdx, uint16_t noChannels);

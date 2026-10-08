@@ -111,7 +111,7 @@ namespace {
 		return int(gain*FEATURE_MAX_VOLUME + 0.5f);
 	}
 }
-USBAudioInInterface::SetBlockQuite USBAudioInInterface::setBlockQuite;
+USBAudioInInterface::SetBlockQuiet USBAudioInInterface::setBlockQuiet;
 USBAudioInInterface::ReleaseBlock USBAudioInInterface::releaseBlock;
 USBAudioInInterface::AllocateBlock USBAudioInInterface::allocateBlock;
 USBAudioInInterface::AreBlocksReady USBAudioInInterface::areBlocksReady;
@@ -186,12 +186,12 @@ void USBAudioInInterface::releaseBlocks(uint16_t bufferIdx){
 	}	
 }
 
-bool USBAudioInInterface::setBlocksQuite(uint32_t noBlocks){
+bool USBAudioInInterface::setBlocksQuiet(uint32_t noBlocks){
 	bool allocationSuccessful=true;
 	for (uint16_t i =0; i< USBAudioInInterface::ringRxBufferSize; i++){
 		for (uint16_t j =0; j< noTransmittedChannels; j++){
 			if(i < noBlocks){
-                if (!USBAudioInInterface::setBlockQuite(i, j)){
+                if (!USBAudioInInterface::setBlockQuiet(i, j)){
 					//allocation failed
 					allocationSuccessful=false;
 					break;
@@ -222,7 +222,7 @@ bool USBAudioInInterface::allocateChannels(uint16_t idx){
 }
 
 USBAudioInInterface::USBAudioInInterface(
-		SetBlockQuite sbq,
+		SetBlockQuiet sbq,
 		ReleaseBlock rb,
 		AllocateBlock ab,
 		AreBlocksReady abr,
@@ -231,7 +231,7 @@ USBAudioInInterface::USBAudioInInterface(
 		float ki) 
 		: _kp(kp), _ki(ki) 
 {
-	USBAudioInInterface::setBlockQuite =sbq;
+	USBAudioInInterface::setBlockQuiet =sbq;
 	USBAudioInInterface::releaseBlock = rb;
 	USBAudioInInterface::allocateBlock = ab;
 	USBAudioInInterface::areBlocksReady = abr;
@@ -444,6 +444,13 @@ void USBAudioInInterface::update(int16_t& bIdx, uint16_t& noChannels)
 	__enable_irq();
 		sumDiff = 0.;
 		feedback_accumulator = feedback_accumulator_default;
+		//give the audio blocks of the ring buffer back to the audio library while no stream is running
+		//(they are allocated again by setBlocksQuiet/resetBuffer when the next stream starts).
+		//First stop usb_audio_receive_callback from writing into the ring buffer (a late packet might still arrive).
+	__disable_irq();
+		rxBufferReady = false;
+	__enable_irq();
+		setBlocksQuiet(0);	//noBlocks=0 -> releases all blocks
 	}
 	
 	if ((_streaming && !rxBufferReady) ||	//we are already streaming but encounter a buffer over- or underrun
@@ -457,13 +464,13 @@ void USBAudioInInterface::update(int16_t& bIdx, uint16_t& noChannels)
 		float resetTimeSec = TARGET_RX_BUFFER_TIME_S+blockDuration;	//+blockDuration because we will transmit one block after this function and want TARGET_RX_BUFFER_TIME_S after this transmission
 		uint32_t resetSamples = uint32_t(resetTimeSec*AUDIO_SAMPLE_RATE);
 		uint32_t noBufferedBlocks = resetSamples/AUDIO_BLOCK_SAMPLES +1;
-		//setBlocksQuite runs with interrupts enabled and releases blocks (sets them to NULL).
+		//setBlocksQuiet runs with interrupts enabled and releases blocks (sets them to NULL).
 		//Make sure usb_audio_receive_callback does not write into the ring buffer meanwhile.
 		//(rxBufferReady can still be true here, e.g. at the start of a new stream with stale buffer content.)
 		__disable_irq();
 		rxBufferReady = false;
 		__enable_irq();
-		if(setBlocksQuite(noBufferedBlocks)){
+		if(setBlocksQuiet(noBufferedBlocks)){
 			__disable_irq();
 			//this must all happen in one un-interrupted block
 			rxBufferReady=resetBuffer(updateCurrentSmooth);	
@@ -572,7 +579,7 @@ namespace {
 	float getNumBufferedTxSamples(USBAudioOutInterface::BufferState txBufferState, uint32_t target, uint16_t incomingIdx, uint16_t transmitIdx, uint16_t outgoingCount){
 		float bufferedSamples= AUDIO_BLOCK_SAMPLES-outgoingCount;
 		if(txBufferState > USBAudioOutInterface::ready){
-			//buffer full or overrund
+			//buffer full or overrun
 			bufferedSamples +=(AUDIO_BLOCK_SAMPLES *(USBAudioOutInterface::ringTxBufferSize-1));
 			return bufferedSamples -target;	//-target because it's assumed that target number of samples will be transmitted after this function call
 		}
@@ -620,7 +627,7 @@ namespace {
 		else if(sign ==1 && target < maxRxTxSamples){
 			devCounter=0;
 			num_send_one_more++;
-			//we run out of buffer space -> speed transmission down
+			//we run out of buffer space -> speed transmission up
 			target++;
 		}
 	}
@@ -658,7 +665,7 @@ namespace {
 		//e.g. if samplingRate=44100 and audioPollingIntervaluS=1000 then base = 44
 		uint32_t target = N / denominator;	
 
-		//rem is the reminder of the devision 'N / denominator'. It represents the fractional samples (but multiplied by denominator).
+		//rem is the remainder of the division 'N / denominator'. It represents the fractional samples (but multiplied by denominator).
 		uint32_t rem  = N % denominator;        
 		
 		//we accumulate the 'fractional' samples by means of the errorAccumulator. 0 <=errorAccumulator < denominator
@@ -675,7 +682,7 @@ namespace {
 	}
 	
 	void resetTransmissionIndex(float virtualSamples, uint16_t incomingIdx, uint16_t& idx, uint16_t& count, uint16_t numSentSamples){
-		//+numSentSamples because we will immediatelly transmit 'numSentSamples' samples
+		//+numSentSamples because we will immediately transmit 'numSentSamples' samples
 		float targetNoSamplesF = targetNumTxBufferedSamples+numSentSamples-virtualSamples;
 		//virtualSamples can exceed the target (e.g. large AUDIO_BLOCK_SAMPLES like 256 at 44.1kHz).
 		//Converting a negative float to an unsigned integer is undefined behavior -> clamp at 0
@@ -898,7 +905,7 @@ unsigned int usb_audio_transmit_callback(void)
 		float timeSinceLastUpdate = (float)toInt32Range(lastIsrSmooth - USBAudioOutInterface::updateCurrentSmooth);
 		timeSinceLastUpdate /= F_CPU_ACTUAL; //to seconds
 		if (timeSinceLastUpdate > 1.5f*USBAudioOutInterface::blockDuration || timeSinceLastUpdate < -0.5f*USBAudioOutInterface::blockDuration){
-			//something really went wrong since update is normally called eveey blockDuration seconds
+			//something really went wrong since update is normally called every blockDuration seconds
 			//-> we use the average value to prevent serious problems
 			timeSinceLastUpdate =0.5f*USBAudioOutInterface::blockDuration;
 		}		

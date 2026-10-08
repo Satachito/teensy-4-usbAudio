@@ -76,6 +76,10 @@ struct usb_audio_features_struct {
 
 #ifdef __cplusplus
 
+// Note: USBAudioInInterface and USBAudioOutInterface keep their state in static members and file-scope
+// variables (one USB audio function, one ring buffer, one set of ISR callbacks). Therefore each class
+// supports exactly ONE instance, i.e. use at most one AudioInputUSB(Quad/Hex/Oct) and at most one
+// AudioOutputUSB(Quad/Hex/Oct) object in a sketch. A second instance would share (and corrupt) the state.
 class USBAudioInInterface
 {
 public:
@@ -91,7 +95,8 @@ public:
 		bool receivingData;						//Teensy is currently receiving data (There was at least one 'usb_audio_receive_callback' since the last 'update' call)
 		uint8_t usb_high_speed;					// 1 for high speed, 0 otherwise
 	};
-	typedef bool (*SetBlockQuite) (uint16_t bIdx, uint16_t channel);
+	typedef bool (*SetBlockQuiet) (uint16_t bIdx, uint16_t channel);
+	typedef SetBlockQuiet SetBlockQuite;	//deprecated: old (misspelled) name, kept for compatibility
 	typedef void (*ReleaseBlock)(uint16_t bIdx, uint16_t channel);
 	typedef bool (*AllocateBlock)(uint16_t bIdx, uint16_t channel);
 	typedef bool (*AreBlocksReady)(uint16_t bIdx, uint16_t noChannels);
@@ -107,7 +112,7 @@ public:
 	constexpr static uint16_t ringRxBufferSize = uint16_t(TARGET_RX_BUFFER_TIME_S / USBAudioInInterface::blockDuration) *2 +3;	
 	
 	USBAudioInInterface(
-		SetBlockQuite sbq,
+		SetBlockQuiet sbq,
 		ReleaseBlock rb,
 		AllocateBlock ab,
 		AreBlocksReady abr,
@@ -138,13 +143,13 @@ public:
 	}
 
 private:
-	uint32_t _bufferedSamples=0;
+	float _bufferedSamples=0.f;
 	float _kp =400.f;
 	float _ki =.2f;
 	float _bufferedSamplesSmooth=0;
 	bool _streaming= false;
 	LastCall<50> _lastCallUpdate;
-	static bool setBlocksQuite(uint32_t noBlocks);
+	static bool setBlocksQuiet(uint32_t noBlocks);
 	static bool allocateChannels(uint16_t idx);
 	static bool resetBuffer(double updateCurrentSmooth);
 	static bool isBufferReady();
@@ -152,7 +157,7 @@ private:
 	static void releaseBlocks(uint16_t bufferIdx);
 	static bool running;
 
-	static SetBlockQuite setBlockQuite;
+	static SetBlockQuiet setBlockQuiet;
 	static ReleaseBlock releaseBlock;
 	static AllocateBlock allocateBlock;
 	static AreBlocksReady areBlocksReady;
@@ -172,7 +177,7 @@ public:
 		uint16_t usb_rx_tx_buffer_size;		//=AUDIO_TX_SIZE_480 or AUDIO_TX_SIZE_12 (bytes, must be larger than AUDIO_SAMPLE_RATE * bInterval_uS*1e-6 * USB_AUDIO_NO_CHANNELS_480 * AUDIO_SUBSLOT_SIZE 
 		uint16_t bInterval_uS;				//polling interval as requested by the Teensy (125, 250, 500 or 1000)
 		uint32_t num_skipped_Samples;		//only used if not ASYNC_TX_ENDPOINT (->adaptive endpoint)	In usb_audio_transmit_callback: how often was a sample skipped to prevent a buffer overrun.
-		uint32_t num_padded_Samples;		//only used if not ASYNC_TX_ENDPOINT (->sdaptive endpoint)	In usb_audio_transmit_callback: how often was a sample padded to prevent a buffer underrun.
+		uint32_t num_padded_Samples;		//only used if not ASYNC_TX_ENDPOINT (->adaptive endpoint)	In usb_audio_transmit_callback: how often was a sample padded to prevent a buffer underrun.
 		uint32_t num_send_one_less;			//only used if ASYNC_TX_ENDPOINT (-> asynchronous endpoint)	In usb_audio_transmit_callback: how often was a sample less than initially planned sent to prevent a buffer underrun.
 		uint32_t num_send_one_more;			//only used if ASYNC_TX_ENDPOINT (-> asynchronous endpoint)	In usb_audio_transmit_callback: how often was a sample more than initially planned sent to prevent a buffer overrun.
 		bool transmittingData;				//Teensy is currently sending data to the host (There was at least one 'usb_audio_transmit_callback' since the last 'update' call)

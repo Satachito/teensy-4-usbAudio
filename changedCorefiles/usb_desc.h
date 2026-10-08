@@ -1014,7 +1014,7 @@ extern const usb_descriptor_list_t usb_descriptor_list[];
   #define ASYNC_TX_ENDPOINT
   
   #define MS_PER_SEC 1000
-  #define MAX_SAMPLES_PER_MS CEIL_DIV(AUDIO_SAMPLE_RATE_I, MS_PER_SEC) //ceil becaause e.g. for 44.1khz we want 45 samples per ms not 44
+  #define MAX_SAMPLES_PER_MS CEIL_DIV(AUDIO_SAMPLE_RATE_I, MS_PER_SEC) //ceil because e.g. for 44.1khz we want 45 samples per ms not 44
   #define RX_TX_ADD_SAMPLES 1  //we allow one additional samples per frame
   
   // defines for 480MBit ================================
@@ -1038,11 +1038,11 @@ extern const usb_descriptor_list_t usb_descriptor_list[];
   #endif
   
   #define RX_TX_BYTES_ADD_SAMPLES_480 (RX_TX_ADD_SAMPLES * USB_AUDIO_NO_CHANNELS_480 * AUDIO_SUBSLOT_SIZE)  //bytes needed for the additional samples
-  #define availBytesPerFrame_480 (1024 - RX_TX_BYTES_ADD_SAMPLES_480) //high speed: we have 1024 bytes per frame minus the space for the additional samples (e.g. if the Teensy requests more samples from the host than expexted)
+  #define availBytesPerFrame_480 (1024 - RX_TX_BYTES_ADD_SAMPLES_480) //high speed: we have 1024 bytes per frame minus the space for the additional samples (e.g. if the Teensy requests more samples from the host than expected)
 
   #define BANDWIDTH_BYTES_PER_MSEC_480 (MAX_SAMPLES_PER_MS * AUDIO_SUBSLOT_SIZE * USB_AUDIO_NO_CHANNELS_480)
   #if BANDWIDTH_BYTES_PER_MSEC_480 <= availBytesPerFrame_480 * 8
-    //we can not handle more than 1024 bytes per mircro frame 
+    //we can not handle more than 1024 bytes per micro frame 
     //if the bandwidth is larger than that, AUDIO_POLLING_INTERVAL_480 will just not be defined and the program won't compile
     #if BANDWIDTH_BYTES_PER_MSEC_480 > availBytesPerFrame_480 * 4 //more than roughly 1024bytes/250us -> we need 8 micro frames per ms
       #define AUDIO_POLLING_INTERVAL_480 1  //1 -> 2^(1-1)=1 -> every micro-frame
