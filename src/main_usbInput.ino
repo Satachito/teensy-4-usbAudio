@@ -30,7 +30,12 @@ void setup() {
 void loop() {
   #ifdef PRINT_VOL_CHANGES
   if (USBAudioInInterface::features.change){
-      Serial.println(USBAudioInInterface::features.volume);
+      Serial.print("volume: ");
+      Serial.print(USBAudioInInterface::features.volume);
+      Serial.print(" (");
+      Serial.print(USBAudioInInterface::features.volume_db256/256.f, 2);
+      Serial.print(" dB), mute: ");
+      Serial.println(USBAudioInInterface::features.mute);
       USBAudioInInterface::features.change =0;
   }
   delay(200);

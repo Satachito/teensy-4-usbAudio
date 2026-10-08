@@ -73,6 +73,8 @@ namespace {
 	uint16_t transmit_rx_bIdx=0;
 	uint32_t feedback_accumulator;
 	uint32_t feedback_accumulator_default;
+	uint32_t feedback_max=0;	//maximum feedback value: the host must not send more samples than fit into rx_buffer (set in usb_audio_configure)
+	uint32_t feedback_min=0;	//minimum feedback value: symmetric to feedback_max around feedback_accumulator_default (set in usb_audio_configure)
 
 	volatile uint32_t rxUsb_audio_underrun_count;	//changed in update
 	volatile uint32_t rxUsb_audio_overrun_count;	//changed in update
@@ -93,7 +95,22 @@ namespace {
 	//========================================================================
 }
 
-struct usb_audio_features_struct USBAudioInInterface::features = {0,0,FEATURE_MAX_VOLUME/2};
+// initial volume: -6 dB -> 255 * 10^(-6/20) = 127.8 -> 128 (~FEATURE_MAX_VOLUME/2 as in the original code)
+struct usb_audio_features_struct USBAudioInInterface::features = {0,0,128,FEATURE_VOLUME_DEFAULT_DB256};
+
+namespace {
+	// converts a volume in 1/256 dB (UAC2) to the linear volume 0...FEATURE_MAX_VOLUME
+	int volumeDb256ToLinear(int db256){
+		if (db256 <= FEATURE_VOLUME_MIN_DB256){
+			return 0;	//minimum is treated as silence
+		}
+		if (db256 >= 0){
+			return FEATURE_MAX_VOLUME;
+		}
+		const float gain = powf(10.f, float(db256) / (20.f*256.f));
+		return int(gain*FEATURE_MAX_VOLUME + 0.5f);
+	}
+}
 USBAudioInInterface::SetBlockQuite USBAudioInInterface::setBlockQuite;
 USBAudioInInterface::ReleaseBlock USBAudioInInterface::releaseBlock;
 USBAudioInInterface::AllocateBlock USBAudioInInterface::allocateBlock;
@@ -131,17 +148,16 @@ static void rx_event(transfer_t *t)
 
 static void sync_event(transfer_t *t)
 {
-	if(feedback_accumulator > maxRxTxSamples*0x1000000){
-		// Serial.print("usb_audio_interface: sync_event: Exceeded maximum number of requeseted Samples. Requested: ");
-		// Serial.print(((double)feedback_accumulator)/0x1000000,8);
-		// Serial.print(", buffer size: ");
-		// Serial.print(maxRxTxSamples);
-		//maximum amount
-		feedback_accumulator =maxRxTxSamples * 0x1000000;
+	//feedback_accumulator is computed (and clamped) in USBAudioInInterface::update.
+	//We only read it here (no write back from the ISR -> no race with update).
+	uint32_t fb = feedback_accumulator;
+	if(fb > feedback_max){
+		//safety net, should not happen because update already clamps
+		fb = feedback_max;
 	}
 	// USB 2.0 Specification, 5.12.4.2 Feedback, pages 73-75
 	//printf("sync %x\n", sync_transfer.status); // too slow, can't print this much
-	usb_audio_sync_feedback = feedback_accumulator >> usb_audio_sync_rshift;
+	usb_audio_sync_feedback = fb >> usb_audio_sync_rshift;
 	usb_prepare_transfer(&sync_transfer, &usb_audio_sync_feedback, usb_audio_sync_nbytes, 0);
 	arm_dcache_flush(&usb_audio_sync_feedback, usb_audio_sync_nbytes);
 	usb_transmit(AUDIO_SYNC_ENDPOINT, &sync_transfer);
@@ -149,7 +165,7 @@ static void sync_event(transfer_t *t)
 
 USBAudioInInterface::Status USBAudioInInterface::getStatus() const{
 	USBAudioInInterface::Status status;
-	NVIC_DISABLE_IRQ(IRQ_SOFTWARE);
+	__disable_irq();	//rxMemoryUnderrunCounter is changed in the USB ISR
 	status.usb_audio_underrun_count = rxUsb_audio_underrun_count;
 	status.usb_audio_overrun_count = rxUsb_audio_overrun_count;
 	status.audio_memory_underrun_count = rxMemoryUnderrunCounter;
@@ -160,7 +176,7 @@ USBAudioInInterface::Status USBAudioInInterface::getStatus() const{
 	status.receivingData=_streaming;
 	status.bInterval_uS = audioPollingIntervaluS;
 	status.usb_high_speed = usb_high_speed;
-	NVIC_ENABLE_IRQ(IRQ_SOFTWARE);
+	__enable_irq();
 	return status;
 }
 
@@ -477,12 +493,31 @@ void USBAudioInInterface::update(int16_t& bIdx, uint16_t& noChannels)
 		_bufferedSamplesSmooth=_bufferedSamples + timeSinceLastIsr * AUDIO_SAMPLE_RATE;
 
 		float diff= targetNumRxBufferedSamples -_bufferedSamplesSmooth;
-		if (abs(lastDiff) <= abs(diff)){
+		if (fabsf(lastDiff) <= fabsf(diff)){
 			//we only add the current diff to the sum, if we the difference is not already decreasing
 			sumDiff +=diff;
 		}
 		lastDiff = diff;
-		feedback_accumulator = uint32_t(feedback_accumulator_default + double(_kp*diff)  + double(_ki*sumDiff) +0.5);
+		//anti-windup: the integral term alone must not be able to leave the allowed feedback range
+		const double fbRange = double(feedback_max) - double(feedback_accumulator_default);
+		if (_ki > 0.f){
+			const float sumDiffLimit = float(fbRange / _ki);
+			if (sumDiff > sumDiffLimit){
+				sumDiff = sumDiffLimit;
+			}
+			else if (sumDiff < -sumDiffLimit){
+				sumDiff = -sumDiffLimit;
+			}
+		}
+		//compute in double and clamp before converting: converting a negative (or too large) double to uint32_t is undefined behavior
+		double fb = double(feedback_accumulator_default) + double(_kp*diff)  + double(_ki*sumDiff) +0.5;
+		if (fb > double(feedback_max)){
+			fb = double(feedback_max);
+		}
+		else if (fb < double(feedback_min)){
+			fb = double(feedback_min);
+		}
+		feedback_accumulator = uint32_t(fb);
 		//========================================================================================================
 		
 		//if buffer is ready, we transmit all channels and increase the transmit index in the ring buffer (indicated by bIdx!=-1)
@@ -675,7 +710,8 @@ USBAudioOutInterface::Copy_from_buffers USBAudioOutInterface::copy_from_buffer;
 static void tx_event(transfer_t *t)
 {
 	int len = usb_audio_transmit_callback();
-	usb_audio_sync_feedback = feedback_accumulator >> usb_audio_sync_rshift;
+	//Note: usb_audio_sync_feedback is only written in sync_event (feedback endpoint), where the cache is flushed.
+	//Writing it here (as in the original UAC1 code) would modify a DMA buffer that might be in use by the sync transfer.
 	usb_prepare_transfer(&tx_transfer, usb_audio_transmit_buffer, len, 0);
 	arm_dcache_flush_delete(usb_audio_transmit_buffer, len);
 	usb_transmit(AUDIO_TX_ENDPOINT, &tx_transfer);
@@ -687,9 +723,9 @@ USBAudioOutInterface::USBAudioOutInterface(ReleaseBlocks rbs, IsBlockReady ibr, 
 }
 float USBAudioOutInterface::getActualBIntervalUs() const {
 	float toUS =1000000.f/F_CPU_ACTUAL;
-	NVIC_DISABLE_IRQ(IRQ_SOFTWARE);
+	__disable_irq();	//lastCallTransmitIsr is changed in the USB ISR
 	float bInterval= (float)lastCallTransmitIsr.getLastDuration()*toUS;
-	NVIC_ENABLE_IRQ(IRQ_SOFTWARE);
+	__enable_irq();
 	return bInterval;
 }
 void USBAudioOutInterface::begin(){
@@ -720,7 +756,7 @@ void USBAudioOutInterface::stop(){
 
 USBAudioOutInterface::Status USBAudioOutInterface::getStatus() const{
 	USBAudioOutInterface::Status status;
-	NVIC_DISABLE_IRQ(IRQ_SOFTWARE);
+	__disable_irq();	//the counters are changed in the USB ISR
 	status.usb_audio_underrun_count = txUsb_audio_underrun_count;
 	status.usb_audio_overrun_count = txUsb_audio_overrun_count;
 	status.target_num_buffered_samples = targetNumTxBufferedSamples;
@@ -734,7 +770,7 @@ USBAudioOutInterface::Status USBAudioOutInterface::getStatus() const{
 	status.num_send_one_less = num_send_one_less;
 	status.num_send_one_more = num_send_one_more;
 	status.usb_high_speed = usb_high_speed;
-	NVIC_ENABLE_IRQ(IRQ_SOFTWARE);
+	__enable_irq();
 	return status;
 }
 
@@ -755,6 +791,13 @@ void USBAudioOutInterface::update(int16_t& bIdx, uint16_t& noChannels)
 		streamStart=transmit_flag && !_streaming;	
 		_streaming=transmit_flag != 0;		
 		if (transmit_flag) transmit_flag--;
+		//Invariant: the caller writes into slot 'incoming_tx_bIdx' after this function returns.
+		//If that slot is also the one usb_audio_transmit_callback reads from (incoming == transmit),
+		//we set 'overrun' here, inside the critical section and before the caller writes.
+		//usb_audio_transmit_callback checks 'overrun' first and moves transmit_tx_bIdx away from
+		//incoming_tx_bIdx (resetTransmissionIndex) before reading. Since the USB ISR has a higher
+		//priority than the audio update, it can never be preempted while reading a slot.
+		//-> the ISR never reads a block that is being replaced/released by the caller.
 		if(txBufferState < overrun && incoming_tx_bIdx == transmit_tx_bIdx){
 			txBufferState=overrun;
 		}
@@ -765,9 +808,12 @@ void USBAudioOutInterface::update(int16_t& bIdx, uint16_t& noChannels)
 		BufferState s = txBufferState;
 	__enable_irq();
 	if(!_streaming){
+		//the counters and buffered samples are also changed in usb_audio_transmit_callback (USB ISR)
+		__disable_irq();
 		resetStatusCounter();
 		bufferedTxSamplesSmooth=0.f;
 		bufferedTxSamples=0.f;
+		__enable_irq();
 	}
 	if(s == overrun){
 		txUsb_audio_overrun_count++;
@@ -799,15 +845,15 @@ void USBAudioOutInterface::tryIncreaseIdxTransmission(uint16_t& tBIdx, uint16_t&
 	}
 }
 float USBAudioOutInterface::getBufferedSamples() const{
-	NVIC_DISABLE_IRQ(IRQ_SOFTWARE);
+	__disable_irq();	//bufferedTxSamples is changed in the USB ISR
 	float b = bufferedTxSamples;
-	NVIC_ENABLE_IRQ(IRQ_SOFTWARE);
+	__enable_irq();
 	return b;
 }
 float USBAudioOutInterface::getBufferedSamplesSmooth() const{
-	NVIC_DISABLE_IRQ(IRQ_SOFTWARE);
+	__disable_irq();	//bufferedTxSamplesSmooth is changed in the USB ISR
 	float b = bufferedTxSamplesSmooth;
-	NVIC_ENABLE_IRQ(IRQ_SOFTWARE);
+	__enable_irq();
 	return b;
 }
 
@@ -937,7 +983,17 @@ void usb_audio_configure(void)
 		audioPollingIntervalSec = AUDIO_POLLING_INTERVAL_480_SEC;
 		audioPollingIntervaluS  = AUDIO_NUM_SUBFRAMES_PER_POLLING_480 * MICROFRAME_US;
 		usb_audio_sync_nbytes   = 4;
+		// feedback_accumulator holds samples per polling interval (bInterval) in 8.24 format.
+		// USB 2.0, 5.12.4.2 defines the high speed feedback value as samples per microframe (16.16).
+		// By default we send samples per polling interval (16.16), which is how this code has been
+		// tested with Windows, macOS and Linux (Linux auto-detects the scaling).
+		// Define AUDIO_FEEDBACK_PER_MICROFRAME to send the value in samples per microframe instead.
+		// Both are identical if AUDIO_POLLING_INTERVAL_480 == 1 (polling every microframe).
+	#ifdef AUDIO_FEEDBACK_PER_MICROFRAME
+		usb_audio_sync_rshift   = 8 + (AUDIO_POLLING_INTERVAL_480-1);	// divide by AUDIO_NUM_SUBFRAMES_PER_POLLING_480
+	#else
 		usb_audio_sync_rshift   = 8;
+	#endif
 	} else {
 		maxRxTxSamples = AUDIO_RX_TX_SIZE_SAMPLES_12;
 		noTransmittedChannels   = USB_AUDIO_NO_CHANNELS_12;
@@ -951,6 +1007,14 @@ void usb_audio_configure(void)
 
 	feedback_accumulator_default = uint32_t((samplingRate *audioPollingIntervalSec) * 0x1000000 +0.5f);
 	feedback_accumulator = feedback_accumulator_default;
+	// upper limit: the host must not send more samples per polling interval than fit into rx_buffer
+	// (computed in 64 bit: maxRxTxSamples * 2^24 overflows uint32_t for maxRxTxSamples >= 256)
+	uint64_t fbMax = uint64_t(maxRxTxSamples) << 24;
+	if (fbMax > UINT32_MAX) fbMax = UINT32_MAX;
+	feedback_max = uint32_t(fbMax);
+	// lower limit: symmetric around the default value
+	const uint32_t fbRange = (feedback_max > feedback_accumulator_default) ? (feedback_max - feedback_accumulator_default) : 0;
+	feedback_min = (feedback_accumulator_default > fbRange) ? (feedback_accumulator_default - fbRange) : 0;
 
 	memset(&rx_transfer, 0, sizeof(rx_transfer));
 	usb_config_rx_iso(AUDIO_RX_ENDPOINT, AUDIO_RX_SIZE, 1, rx_event);
@@ -1020,15 +1084,18 @@ int usb_audio_get_feature(void *stp, uint8_t *data, uint32_t *datalen)
 		}
 		else if (setup.bCS==0x02) { // volume
 			//Have a look at the UAC2 specification page 102, section 5.2.5.7.2 Volume Control
-			const int16_t maxVol = FEATURE_MAX_VOLUME;
+			//The values are signed 16 bit in units of 1/256 dB
+			const int16_t minVol = FEATURE_VOLUME_MIN_DB256;
+			const int16_t maxVol = FEATURE_VOLUME_MAX_DB256;
+			const int16_t resVol = FEATURE_VOLUME_RES_DB256;
 			data[0] = 1; //only one sub-range (LSB of 2 bytes)
 			data[1] = 0; //only one sub-range (MSB of 2 bytes)
-			data[2] = 0;	// min level is 0 (LSB)
-			data[3] = 0; 	// min level is 0 (MSB)
-			data[4] = maxVol & 0xFF;  		// max level, for range of 0 to MAX (LSB)
-			data[5] = (maxVol>>8) & 0xFF;	// max level, for range of 0 to MAX (MSB)
-			data[6] = 1;	// increment vol by by 1 (LSB)
-			data[7] = 0;	// increment vol by by 1 (MSB)
+			data[2] = minVol & 0xFF;		// min level (LSB)
+			data[3] = (minVol>>8) & 0xFF;	// min level (MSB)
+			data[4] = maxVol & 0xFF;		// max level (LSB)
+			data[5] = (maxVol>>8) & 0xFF;	// max level (MSB)
+			data[6] = resVol & 0xFF;		// resolution (LSB)
+			data[7] = (resVol>>8) & 0xFF;	// resolution (MSB)
 			*datalen = 8;
 			return 1;
 		}
@@ -1043,7 +1110,7 @@ int usb_audio_get_feature(void *stp, uint8_t *data, uint32_t *datalen)
 			return 1;
 		}
 		else if (setup.bCS==0x02) { // volume
-			const int16_t vol = (int16_t)USBAudioInInterface::features.volume;
+			const int16_t vol = (int16_t)USBAudioInInterface::features.volume_db256;	//1/256 dB
 			data[0] = vol & 0xFF;	//(LSB)
 			data[1] = (vol>>8) & 0xFF; //(MSB)
 			*datalen = 2;
@@ -1073,9 +1140,15 @@ int usb_audio_set_feature(void *stp, uint8_t *buf)
 			else if (setup.bCS==0x02) { // volume
 				if (setup.bRequest==0x01) { // CUR
 					//Have a look at the UAC2 specification page 102, section 5.2.5.7.2 Volume Control
-					//volume uses two bytes
-					const int16_t *volPtr =(const int16_t *)buf;
-					USBAudioInInterface::features.volume = *volPtr;
+					//volume uses two bytes: signed, little endian, units of 1/256 dB
+					//(read byte-wise: no unaligned access / strict aliasing issue)
+					int db256 = (int16_t)(uint16_t(buf[0]) | (uint16_t(buf[1]) << 8));
+					if (db256 < FEATURE_VOLUME_MIN_DB256) db256 = FEATURE_VOLUME_MIN_DB256;
+					if (db256 > FEATURE_VOLUME_MAX_DB256) db256 = FEATURE_VOLUME_MAX_DB256;
+					//Note: the feature unit also declares per-channel volume controls; as before,
+					//all of them (and the master control) set the same, single volume.
+					USBAudioInInterface::features.volume_db256 = db256;
+					USBAudioInInterface::features.volume = volumeDb256ToLinear(db256);
 					USBAudioInInterface::features.change = 1;
 					return 1;
 				}

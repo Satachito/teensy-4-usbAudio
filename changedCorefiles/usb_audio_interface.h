@@ -34,9 +34,21 @@
 #include "usb_desc.h"
 #ifdef AUDIO_INTERFACE
 
+#include <math.h>
+
 #include "util/LastCall.h"
 
-#define FEATURE_MAX_VOLUME 0xFF  // volume accepted from 0 to 0xFF
+#define FEATURE_MAX_VOLUME 0xFF  // features.volume ranges from 0 to 0xFF (linear gain * FEATURE_MAX_VOLUME)
+
+// UAC2 (section 5.2.5.7.2) defines the volume control in units of 1/256 dB (signed 16 bit).
+// The host sets the volume in dB within the range below; it is converted to the linear features.volume.
+#ifndef FEATURE_VOLUME_MIN_DB
+#define FEATURE_VOLUME_MIN_DB (-60)	// minimum volume in dB (the minimum is treated as silence)
+#endif
+#define FEATURE_VOLUME_MIN_DB256 (FEATURE_VOLUME_MIN_DB*256)
+#define FEATURE_VOLUME_MAX_DB256 0		// maximum volume: 0 dB (unity gain)
+#define FEATURE_VOLUME_RES_DB256 128	// resolution: 0.5 dB
+#define FEATURE_VOLUME_DEFAULT_DB256 (-6*256)	// initial volume: -6 dB (~ FEATURE_MAX_VOLUME/2 as in the original code)
 #define TARGET_RX_BUFFER_TIME_S 0.0018f	//targeted buffered time (latency) in seconds
 #define MICROFRAME_US 125 // defined by the USB standard
 
@@ -58,7 +70,8 @@ extern int usb_audio_get_feature(void *stp, uint8_t *data, uint32_t *datalen);
 struct usb_audio_features_struct {
   int change;  // set to 1 when any value is changed
   int mute;    // 1=mute, 0=unmute
-  int volume;  // volume from 0 to FEATURE_MAX_VOLUME, maybe should be float from 0.0 to 1.0
+  int volume;  // linear volume from 0 to FEATURE_MAX_VOLUME (derived from volume_db256)
+  int volume_db256;  // volume as set by the host in 1/256 dB (FEATURE_VOLUME_MIN_DB256 ... FEATURE_VOLUME_MAX_DB256)
 };
 
 #ifdef __cplusplus
@@ -114,9 +127,14 @@ public:
 	friend int usb_audio_set_feature(void *stp, uint8_t *buf);
 	friend int usb_audio_get_feature(void *stp, uint8_t *data, uint32_t *datalen);
 	static struct usb_audio_features_struct features;
+	// linear gain 0.0 ... 1.0 as requested by the host (mute and volume)
+	// computed from the dB value directly, because the integer features.volume is coarse at low volumes
 	float volume(void) {
-		if (features.mute) return 0.0;
-		return (float)(features.volume) * (1.0 / (float)FEATURE_MAX_VOLUME);
+		if (features.mute) return 0.0f;
+		const int db256 = features.volume_db256;
+		if (db256 <= FEATURE_VOLUME_MIN_DB256) return 0.0f;
+		if (db256 >= 0) return 1.0f;
+		return powf(10.f, float(db256) / (20.f*256.f));
 	}
 
 private:
