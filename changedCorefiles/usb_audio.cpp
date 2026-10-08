@@ -165,6 +165,8 @@ void AudioOutputUSB::update(void){
 				release(b);
 			}
 		}
+		//nothing to store: bIdx is -1 and must not be used as an index into txBuffer
+		return;
 	}
 	for (uint16_t i =0; i< noChannels; i++){
 		if(txBuffer[bIdx][i]){

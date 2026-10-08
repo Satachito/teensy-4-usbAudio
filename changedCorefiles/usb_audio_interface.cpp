@@ -441,6 +441,12 @@ void USBAudioInInterface::update(int16_t& bIdx, uint16_t& noChannels)
 		float resetTimeSec = TARGET_RX_BUFFER_TIME_S+blockDuration;	//+blockDuration because we will transmit one block after this function and want TARGET_RX_BUFFER_TIME_S after this transmission
 		uint32_t resetSamples = uint32_t(resetTimeSec*AUDIO_SAMPLE_RATE);
 		uint32_t noBufferedBlocks = resetSamples/AUDIO_BLOCK_SAMPLES +1;
+		//setBlocksQuite runs with interrupts enabled and releases blocks (sets them to NULL).
+		//Make sure usb_audio_receive_callback does not write into the ring buffer meanwhile.
+		//(rxBufferReady can still be true here, e.g. at the start of a new stream with stale buffer content.)
+		__disable_irq();
+		rxBufferReady = false;
+		__enable_irq();
 		if(setBlocksQuite(noBufferedBlocks)){
 			__disable_irq();
 			//this must all happen in one un-interrupted block
@@ -634,7 +640,14 @@ namespace {
 	}
 	
 	void resetTransmissionIndex(float virtualSamples, uint16_t incomingIdx, uint16_t& idx, uint16_t& count, uint16_t numSentSamples){
-		uint16_t targetNoSamples =uint16_t(targetNumTxBufferedSamples+numSentSamples-virtualSamples  + 0.f);	//+numSentSamples because we will immediatelly transmit 'numSentSamples' samples
+		//+numSentSamples because we will immediatelly transmit 'numSentSamples' samples
+		float targetNoSamplesF = targetNumTxBufferedSamples+numSentSamples-virtualSamples;
+		//virtualSamples can exceed the target (e.g. large AUDIO_BLOCK_SAMPLES like 256 at 44.1kHz).
+		//Converting a negative float to an unsigned integer is undefined behavior -> clamp at 0
+		if (targetNoSamplesF < 0.f){
+			targetNoSamplesF = 0.f;
+		}
+		uint16_t targetNoSamples =uint16_t(targetNoSamplesF);
 		uint16_t targetNumTxBufferedBlocks = uint16_t(targetNoSamples/AUDIO_BLOCK_SAMPLES);
 		count = AUDIO_BLOCK_SAMPLES-(targetNoSamples-targetNumTxBufferedBlocks*AUDIO_BLOCK_SAMPLES);
 		idx = (incomingIdx -(targetNumTxBufferedBlocks+1)+USBAudioOutInterface::ringTxBufferSize)%USBAudioOutInterface::ringTxBufferSize;
